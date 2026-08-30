@@ -48,7 +48,7 @@ The following macOS-specific modules are available:
 - **vscode**: Installs and configures Visual Studio Code and extensions
 - **finder**: Manages macOS Finder preferences and settings
 - **keyboard**: Manages keyboard shortcuts and modifier key mappings
-- **claude**: Configures Claude Desktop (MCP servers) and Claude Code CLI (uses common/claude)
+- **claude**: Configures Claude Code — CLI, settings, hooks, skills and MCP servers (uses common/claude). Runs as independent steps, so skills can be updated without reinstalling the CLI: `sh modules/claude/apply.sh skills`
 
 Each module is independent but may depend on other modules for proper functionality.
 
@@ -171,15 +171,20 @@ git commit -m "chore: update common submodule"
 
 If your local `main` has diverged from the detached commits, use `git merge` (without `--ff-only`) or `git rebase` instead.
 
-### Debug MCP server for Claude Desktop
+### Inspect MCP servers for Claude Code
 
 ```sh
-tail -n 20 -f ~/Library/Logs/Claude/mcp*.log
+claude mcp list                       # configured servers and their health
+claude mcp get context7               # details for one server
+jq '.mcpServers' ~/.claude.json       # raw user-scope configuration
 ```
 
-### Check the current config for Claude Desktop
+### Update only part of the Claude setup
 
 ```sh
-cat ~/Library/Application\ Support/Claude/claude_desktop_config.json
+sh modules/claude/apply.sh doctor     # report drift without changing anything
+sh modules/claude/apply.sh skills     # refresh skills after a submodule update
+sh modules/claude/apply.sh mcp        # re-apply MCP servers
+bash modules/claude/backup.sh mcp     # write live MCP servers back to the template
 ```
 

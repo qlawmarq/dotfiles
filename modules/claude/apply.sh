@@ -1,337 +1,116 @@
 #!/bin/bash
 
-# ====================
-# Claude Desktop initialization script
-# ====================
+# ============================================================
+# Claude Code setup - step dispatcher
+#
+# Usage:
+#   sh apply.sh                 # interactive step menu (TTY) / all steps (non-TTY)
+#   sh apply.sh skills          # run a single step
+#   sh apply.sh skills mcp      # run several (always in canonical order)
+#   sh apply.sh all             # run everything
+#   CLAUDE_APPLY_STEPS="skills" sh apply.sh
+#
+# The top-level apply.sh invokes this with no arguments, so argument
+# support is an extra affordance for direct invocation. Every step is
+# independent: updating skills does not require reinstalling the CLI.
+# ============================================================
 
-# Function to select from JSON configuration (for Claude)
-# Usage: select_from_json "header_message" "json_file" "parent_key"
-# Returns: Selected keys in $SELECTED_JSON_KEYS
-select_from_json() {
-    local header="$1"
-    local json_file="$2"
-    local parent_key="${3:-mcpServers}"
-    
-    # Check if jq exists
-    if ! command_exists "jq"; then
-        print_error "jq is required for JSON parsing but not found"
-        return 1
-    fi
-    
-    # Extract keys
-    keys=()
-    local keys_file=$(mktemp)
-    jq -r ".$parent_key | keys[]" "$json_file" > "$keys_file" 2>/dev/null
-    
-    while IFS= read -r line; do
-        keys+=("$line")
-    done < "$keys_file"
-    rm -f "$keys_file"
-    
-    # Select items
-    smart_select_items "$header" "${keys[@]}"
-    SELECTED_JSON_KEYS="$SELECTED_ITEMS"
-}
-
-# Function to filter JSON based on selected keys (for Claude)
-# Usage: filter_json "input_file" "output_file" "parent_key" "selected_keys"
-filter_json() {
-    local input="$1"
-    local output="$2"
-    local parent_key="${3:-mcpServers}"
-    local keys="$4"
-    
-    # Create a new JSON with just the parent object
-    echo "{\"$parent_key\":{}}" > "$output"
-    
-    # Add each selected key
-    for key in $keys; do
-        local temp_file=$(mktemp)
-        value=$(jq ".$parent_key.\"$key\"" "$input")
-        jq --arg key "$key" --argjson value "$value" ".$parent_key[\$key] = \$value" "$output" > "$temp_file"
-        mv "$temp_file" "$output"
-    done
-}
-
-# Directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 DOTFILES_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 COMMON_DIR="$DOTFILES_DIR/modules/common"
 
-# Load utils
 if [ -f "$DOTFILES_DIR/lib/utils.sh" ]; then
-    source "$DOTFILES_DIR/lib/utils.sh"
+    . "$DOTFILES_DIR/lib/utils.sh"
 else
-    echo "Error: utils.sh not found at $DOTFILES_DIR/lib/utils.sh"
+    echo "Error: utils.sh not found at $DOTFILES_DIR/lib/utils.sh" >&2
     exit 1
 fi
 
 check_macos
 
-# Source menu functions
 if [ -f "$DOTFILES_DIR/lib/menu.sh" ]; then
-    source "$DOTFILES_DIR/lib/menu.sh"
+    . "$DOTFILES_DIR/lib/menu.sh"
 else
-    echo "Error: menu.sh not found at $DOTFILES_DIR/lib/menu.sh"
+    print_error "menu.sh not found at $DOTFILES_DIR/lib/menu.sh"
     exit 1
 fi
 
-# Print header
-print_info "Claude Desktop Setup"
+. "$SCRIPT_DIR/lib.sh"
+
+if [ ! -d "$COMMON_DIR/claude" ]; then
+    print_error "Common submodule not initialized."
+    print_info "Run: git submodule update --init"
+    exit 1
+fi
+
+CLAUDE_DIR="$HOME/.claude"
+
+ALL_STEPS="cli hooks settings skills mcp notifications doctor"
+
+# ------------------------------------------------------------
+# Resolve which steps to run
+# ------------------------------------------------------------
+STEPS="$*"
+[ -z "$STEPS" ] && STEPS="${CLAUDE_APPLY_STEPS:-}"
+
+if [ -z "$STEPS" ]; then
+    if [ -t 0 ]; then
+        # smart_select_items clears the screen, so print the header after it
+        smart_select_items "Select Claude Code setup steps" $ALL_STEPS
+        STEPS="$SELECTED_ITEMS"
+    else
+        STEPS="$ALL_STEPS"
+    fi
+fi
+
+[ "$STEPS" = "all" ] && STEPS="$ALL_STEPS"
+
+if [ -z "$STEPS" ]; then
+    print_warning "No steps selected"
+    exit 0
+fi
+
+for s in $STEPS; do
+    case " $ALL_STEPS " in
+        *" $s "*) ;;
+        *)
+            print_error "Unknown step: $s"
+            print_info "Valid steps: $ALL_STEPS"
+            exit 1
+            ;;
+    esac
+done
+
+# Re-order into canonical order; menu selection order is not meaningful
+RUN=""
+for s in $ALL_STEPS; do
+    case " $STEPS " in
+        *" $s "*) RUN="$RUN $s" ;;
+    esac
+done
+
+print_info "Claude Code Setup"
 echo "======================"
+print_info "Steps:$RUN"
+echo ""
 
-# Check for required dependencies
-print_info "Checking dependencies..."
+# ------------------------------------------------------------
+# Run each step in a subshell so a step's `exit` cannot abort the
+# module and no variables leak between steps.
+# ------------------------------------------------------------
+FAILED=""
+for s in $RUN; do
+    print_info "--- step: $s ---"
+    if ! ( . "$SCRIPT_DIR/steps/$s.sh" ); then
+        FAILED="$FAILED $s"
+    fi
+    echo ""
+done
 
-# Check if mise is installed
-if ! command_exists "mise"; then
-    print_error "mise is not installed. Please run the mise setup first. You can install it via the 'brew' module."
+if [ -n "$FAILED" ]; then
+    print_error "Failed steps:$FAILED"
     exit 1
 fi
 
-# Check if uv is installed
-if ! command_exists "uv"; then
-    print_error "uv is not installed. Please install Node.js first. You can install it via the 'mise' module."
-    exit 1
-fi
-
-# Check if node is installed
-if ! command_exists "node"; then
-    print_error "Node.js is not installed. Please install Node.js first. You can install it via the 'mise' module."
-    exit 1
-fi
-
-# Check if Claude Desktop is installed
-if [ ! -d "/Applications/Claude.app" ]; then
-    print_error "Claude Desktop is not installed. Please install it first. You can install it via the 'brew' module."
-    exit 1
-fi
-
-# Create Claude config directory
-print_info "Setting up Claude Desktop configuration..."
-CLAUDE_CONFIG_DIR="$HOME/Library/Application Support/Claude"
-mkdir -p "$CLAUDE_CONFIG_DIR"
-
-# Get current versions from mise
-PYTHON_VERSION=$(mise current python | awk '{print $1}')
-NODE_VERSION=$(mise current node | awk '{print $1}')
-
-# Check if runtimes are installed
-if [ -z "$PYTHON_VERSION" ]; then
-    print_error "Python is not installed through mise."
-    exit 1
-fi
-
-if [ -z "$NODE_VERSION" ]; then
-    print_error "Node.js is not installed through mise."
-    exit 1
-fi
-
-# Try to get tokens from existing config file
-CONFIG_FILE="$CLAUDE_CONFIG_DIR/claude_desktop_config.json"
-
-# Parse configuration template and allow selection
-CONFIG_TEMPLATE="$SCRIPT_DIR/claude_desktop_config.json"
-if [ ! -f "$CONFIG_TEMPLATE" ]; then
-    print_error "Claude Desktop configuration template not found at $CONFIG_TEMPLATE"
-    exit 1
-fi
-
-# Check if jq exists for JSON manipulation
-if command_exists "jq"; then
-    print_info "Selecting MCP servers to configure..."
-    # Select MCP servers from configuration
-    select_from_json "Select MCP servers to configure" "$CONFIG_TEMPLATE" "mcpServers"
-    
-    if [ -n "$SELECTED_JSON_KEYS" ]; then
-        # Create filtered JSON with only selected servers
-        TMP_JSON=$(mktemp)
-        filter_json "$CONFIG_TEMPLATE" "$TMP_JSON" "mcpServers" "$SELECTED_JSON_KEYS"
-        TEMPLATE_JSON=$(cat "$TMP_JSON")
-        rm -f "$TMP_JSON"
-    else
-        print_warning "No MCP servers selected, using entire configuration"
-        TEMPLATE_JSON=$(cat "$CONFIG_TEMPLATE")
-    fi
-else
-    print_warning "jq not found - using the entire configuration template"
-    TEMPLATE_JSON=$(cat "$CONFIG_TEMPLATE")
-fi
-
-# Create temporary config with current versions
-print_info "Updating configuration with Python $PYTHON_VERSION and Node.js $NODE_VERSION..."
-
-# First replace versions in a temporary file
-TMP_CONFIG=$(mktemp)
-echo "$TEMPLATE_JSON" | \
-    sed -e "s|\$NODE_VERSION|$NODE_VERSION|g" \
-        -e "s|\$PYTHON_VERSION|$PYTHON_VERSION|g" > "$TMP_CONFIG"
-
-# Clean up
-rm -f "$TMP_CONFIG"
-
-# Install @anthropic-ai/claude-code if needed
-if confirm "Would you like to install @anthropic-ai/claude-code?"; then
-    print_info "Installing @anthropic-ai/claude-code..."
-    npm install -g @anthropic-ai/claude-code@latest
-    print_success "@anthropic-ai/claude-code installed"
-    # Add MCP server globally from Claude Desktop
-    claude mcp add-from-claude-desktop -s user
-
-    # Deploy Claude Code settings from common
-    CLAUDE_CODE_SETTINGS_DIR="$HOME/.claude"
-    CLAUDE_CODE_SETTINGS_SOURCE="$COMMON_DIR/claude/settings.json"
-    CLAUDE_CODE_SETTINGS_TARGET="$CLAUDE_CODE_SETTINGS_DIR/settings.json"
-
-    if [ -f "$CLAUDE_CODE_SETTINGS_SOURCE" ]; then
-        mkdir -p "$CLAUDE_CODE_SETTINGS_DIR"
-        cp "$CLAUDE_CODE_SETTINGS_SOURCE" "$CLAUDE_CODE_SETTINGS_TARGET"
-        print_success "Claude Code settings applied from common"
-    else
-        print_warning "Claude Code settings not found in common submodule"
-    fi
-
-    # Deploy Claude Code resources from common
-    print_info "Deploying Claude Code configurations from common..."
-
-    # Ask if user wants to clean up old files
-    CLEANUP_MODE=false
-    if confirm "Would you like to clean up old files before deploying? (removes all existing files in each resource directory)"; then
-        CLEANUP_MODE=true
-        print_warning "Cleanup mode enabled - old files will be removed"
-    fi
-
-    # Clean up old directories if requested
-    if [ "$CLEANUP_MODE" = true ]; then
-        # Clean skill directories (both Claude Code and cross-agent)
-        [ -d "$CLAUDE_CODE_SETTINGS_DIR/skills" ] && rm -rf "$CLAUDE_CODE_SETTINGS_DIR/skills"
-        [ -d "$HOME/.agents/skills" ] && rm -rf "$HOME/.agents/skills"
-
-        # Clean legacy directories (agents, commands)
-        [ -d "$CLAUDE_CODE_SETTINGS_DIR/agents" ] && rm -rf "$CLAUDE_CODE_SETTINGS_DIR/agents"
-        [ -d "$CLAUDE_CODE_SETTINGS_DIR/commands" ] && rm -rf "$CLAUDE_CODE_SETTINGS_DIR/commands"
-
-        # Clean tools directory
-        [ -d "$CLAUDE_CODE_SETTINGS_DIR/tools" ] && rm -rf "$CLAUDE_CODE_SETTINGS_DIR/tools"
-
-        print_warning "Old directories removed"
-    fi
-
-    # Deploy skills (flat structure, Open Standard compliant)
-    # Each direct subdirectory with a SKILL.md is a skill
-    deploy_skills() {
-        local src_dir="$1"
-        local dest_dir="$2"
-
-        mkdir -p "$dest_dir"
-
-        for skill_dir in "$src_dir"/*; do
-            [ -d "$skill_dir" ] || continue
-            [ -f "$skill_dir/SKILL.md" ] || continue
-            cp -r "$skill_dir" "$dest_dir/"
-        done
-    }
-
-    # Deploy cross-agent skills (to both .claude/skills/ and .agents/skills/)
-    COMMON_SKILLS_DIR="$COMMON_DIR/skills"
-    if [ -d "$COMMON_SKILLS_DIR" ]; then
-        print_info "Deploying cross-agent skills..."
-
-        AGENTS_SKILLS_DIR="$HOME/.agents/skills"
-        deploy_skills "$COMMON_SKILLS_DIR" "$CLAUDE_CODE_SETTINGS_DIR/skills"
-        deploy_skills "$COMMON_SKILLS_DIR" "$AGENTS_SKILLS_DIR"
-
-        # Set executable permissions for scripts in skills
-        find "$CLAUDE_CODE_SETTINGS_DIR/skills" -type f \( -name "*.sh" -o -name "*.py" \) -exec chmod +x {} \; 2>/dev/null || true
-        find "$AGENTS_SKILLS_DIR" -type f \( -name "*.sh" -o -name "*.py" \) -exec chmod +x {} \; 2>/dev/null || true
-
-        print_success "Cross-agent skills deployed to ~/.claude/skills/ and ~/.agents/skills/"
-    fi
-
-    # Deploy Claude-specific skills
-    CLAUDE_SKILLS_DIR="$COMMON_DIR/claude/skills"
-    if [ -d "$CLAUDE_SKILLS_DIR" ]; then
-        print_info "Deploying Claude-specific skills..."
-        deploy_skills "$CLAUDE_SKILLS_DIR" "$CLAUDE_CODE_SETTINGS_DIR/skills"
-
-        # Set executable permissions for scripts
-        find "$CLAUDE_CODE_SETTINGS_DIR/skills" -type f \( -name "*.sh" -o -name "*.py" \) -exec chmod +x {} \; 2>/dev/null || true
-
-        print_success "Claude-specific skills deployed"
-    fi
-
-    # Deploy tools from common
-    TOOLS_DIR="$COMMON_DIR/claude/tools"
-    if [ -d "$TOOLS_DIR" ]; then
-        print_info "Deploying tools..."
-        mkdir -p "$CLAUDE_CODE_SETTINGS_DIR/tools"
-        cp -r "$TOOLS_DIR"/* "$CLAUDE_CODE_SETTINGS_DIR/tools/" 2>/dev/null || true
-
-        # Set executable permissions for scripts
-        find "$CLAUDE_CODE_SETTINGS_DIR/tools" -type f \( -name "*.sh" -o -name "*.py" \) -exec chmod +x {} \; 2>/dev/null || true
-
-        print_success "Tools deployed"
-    fi
-
-    # Deploy hooks from common
-    print_info "Deploying hooks from common..."
-    mkdir -p "$CLAUDE_CODE_SETTINGS_DIR/hooks"
-
-    # Copy common hook
-    if [ -f "$COMMON_DIR/claude/hooks/auto-approve-safe-commands.sh" ]; then
-        cp "$COMMON_DIR/claude/hooks/auto-approve-safe-commands.sh" "$CLAUDE_CODE_SETTINGS_DIR/hooks/"
-        chmod +x "$CLAUDE_CODE_SETTINGS_DIR/hooks/auto-approve-safe-commands.sh"
-    fi
-
-    # Copy macOS-specific hooks
-    if [ -d "$COMMON_DIR/claude/hooks/platform/macos" ]; then
-        cp "$COMMON_DIR/claude/hooks/platform/macos"/* "$CLAUDE_CODE_SETTINGS_DIR/hooks/" 2>/dev/null || true
-        chmod +x "$CLAUDE_CODE_SETTINGS_DIR/hooks"/*.sh 2>/dev/null || true
-    fi
-
-    print_success "Hooks deployed"
-
-    # Setup notification permissions for hooks
-    if [ -d "$COMMON_DIR/claude/hooks/platform/macos" ]; then
-        if confirm "Would you like to set up notification permissions for hooks?"; then
-            # Setup notification permissions via Script Editor
-            echo ""
-            print_info "Setting up notification permissions..."
-            echo ""
-            print_info "To enable notifications, you need to grant permission to Script Editor."
-            echo "A test notification script will be opened in Script Editor."
-            echo ""
-
-            # Create a temporary AppleScript file for notification permission request
-            TEMP_SCRIPT=$(mktemp).scpt
-            cat > "$TEMP_SCRIPT" << 'EOF'
-display notification "Test notification from Claude Code" with title "Notification Permission Request"
-EOF
-
-            # Open the script in Script Editor
-            open -a "Script Editor" "$TEMP_SCRIPT"
-            sleep 1
-
-            echo "Please follow these steps in Script Editor:"
-            echo "  1. Click the 'Run' button (▶) at the top of the window"
-            echo "  2. Grant notification permission when prompted"
-            echo "  3. You should see a notification appear"
-            echo ""
-
-            if confirm "Have you run the script and granted permission?"; then
-                # Clean up temporary script
-                rm -f "$TEMP_SCRIPT"
-                print_success "Notification permissions setup complete"
-                print_info "Note: You can close Script Editor now"
-            else
-                # Clean up even if user skips
-                rm -f "$TEMP_SCRIPT"
-                print_info "You can grant notification permissions later by running the script manually"
-            fi
-        else
-            print_warning "Skipping notification permissions setup"
-        fi
-    fi
-fi
-
-print_success "Claude Desktop configuration updated successfully"
+print_success "Claude Code setup completed"
+exit 0

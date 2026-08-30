@@ -1,63 +1,104 @@
 #!/bin/bash
 
-# Load utils
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ============================================================
+# Claude Code configuration backup - step dispatcher
+#
+# Usage:
+#   bash backup.sh              # interactive step menu (TTY) / all steps
+#   bash backup.sh mcp          # single step
+#   CLAUDE_BACKUP_STEPS="mcp" bash backup.sh
+#
+# Writes live configuration back into the repository:
+#   mcp      -> modules/claude/mcp-servers.json
+#   settings -> modules/common/claude/settings.json  (SUBMODULE)
+# ============================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 DOTFILES_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+COMMON_DIR="$DOTFILES_DIR/modules/common"
+
 if [ -f "$DOTFILES_DIR/lib/utils.sh" ]; then
-    source "$DOTFILES_DIR/lib/utils.sh"
+    . "$DOTFILES_DIR/lib/utils.sh"
 else
-    echo "Error: utils.sh not found at $DOTFILES_DIR/lib/utils.sh"
+    echo "Error: utils.sh not found at $DOTFILES_DIR/lib/utils.sh" >&2
     exit 1
 fi
 
 check_macos
 
-# Sync Claude Desktop configuration
-echo "Syncing Claude Desktop configuration..."
-CLAUDE_CONFIG_DIR=~/Library/Application\ Support/Claude
-if [ -f "$CLAUDE_CONFIG_DIR/claude_desktop_config.json" ]; then
-    echo "Found existing configuration file"
-    
-    # Get current runtime versions from mise
-    NODE_VERSION=$(mise current node | awk '{print $1}')
-    PYTHON_VERSION=$(mise current python | awk '{print $1}')
-    echo "Current versions - Node: $NODE_VERSION, Python: $PYTHON_VERSION"
-    
-    # Create temporary file for processing
-    TMP_CONFIG=$(mktemp)
-    echo "Created temporary file: $TMP_CONFIG"
-    
-    # Process the configuration file in a single sed command
-    cat "$CLAUDE_CONFIG_DIR/claude_desktop_config.json" | sed -E "s|node/[0-9]+\.[0-9]+\.[0-9]+|node/\$NODE_VERSION|g; \
-        s|python/[0-9]+\.[0-9]+\.[0-9]+|python/\$PYTHON_VERSION|g; \
-        s|${HOME}|\$HOME|g;" > "$TMP_CONFIG"
-    
-    echo "Configuration processed. Checking file size..."
-    
-    # Check if the file was processed correctly
-    if [ -s "$TMP_CONFIG" ]; then
-        echo "Moving processed configuration to template..."
-        mv "$TMP_CONFIG" "${SCRIPT_DIR}/claude_desktop_config.json"
-        echo "✓ Claude Desktop configuration synced with version placeholders"
-    else
-        echo "Error: Processed configuration file is empty"
-        rm "$TMP_CONFIG"
-        exit 1
-    fi
-else
-    echo "Claude Desktop configuration file not found at $CLAUDE_CONFIG_DIR/claude_desktop_config.json"
+if [ -f "$DOTFILES_DIR/lib/menu.sh" ]; then
+    . "$DOTFILES_DIR/lib/menu.sh"
 fi
 
-CLAUDE_CODE_SETTINGS_SOURCE="$HOME/.claude/settings.json"
-CLAUDE_CODE_SETTINGS_TARGET="$SCRIPT_DIR/settings.json"
+. "$SCRIPT_DIR/lib.sh"
 
-if [ -f "$CLAUDE_CODE_SETTINGS_SOURCE" ]; then
-    if confirm "Would you like to back up Claude Code settings?"; then
-        cp "$CLAUDE_CODE_SETTINGS_SOURCE" "$CLAUDE_CODE_SETTINGS_TARGET"
-        print_success "Claude Code settings synced to $CLAUDE_CODE_SETTINGS_TARGET"
+CLAUDE_DIR="$HOME/.claude"
+
+ALL_STEPS="mcp settings"
+
+STEPS="$*"
+[ -z "$STEPS" ] && STEPS="${CLAUDE_BACKUP_STEPS:-}"
+
+if [ -z "$STEPS" ]; then
+    if [ -t 0 ]; then
+        smart_select_items "Select what to back up" $ALL_STEPS
+        STEPS="$SELECTED_ITEMS"
     else
-        print_warning "Skipping Claude Code settings backup"
+        STEPS="$ALL_STEPS"
     fi
-else
-    print_warning "Claude Code settings file not found at $CLAUDE_CODE_SETTINGS_SOURCE"
 fi
+
+[ "$STEPS" = "all" ] && STEPS="$ALL_STEPS"
+
+if [ -z "$STEPS" ]; then
+    print_warning "Nothing selected"
+    exit 0
+fi
+
+for s in $STEPS; do
+    case " $ALL_STEPS " in
+        *" $s "*) ;;
+        *)
+            print_error "Unknown step: $s"
+            print_info "Valid steps: $ALL_STEPS"
+            exit 1
+            ;;
+    esac
+done
+
+RUN=""
+for s in $ALL_STEPS; do
+    case " $STEPS " in
+        *" $s "*) RUN="$RUN $s" ;;
+    esac
+done
+
+print_info "Backing up Claude Code configuration"
+echo "====================================="
+print_info "Steps:$RUN"
+echo ""
+
+COMMON_TOUCHED=false
+FAILED=""
+for s in $RUN; do
+    print_info "--- step: $s ---"
+    if ! ( . "$SCRIPT_DIR/backup-steps/$s.sh" ); then
+        FAILED="$FAILED $s"
+    fi
+    [ "$s" = "settings" ] && COMMON_TOUCHED=true
+    echo ""
+done
+
+if [ "$COMMON_TOUCHED" = true ]; then
+    print_warning "modules/common (submodule) was modified. Commit it there first:"
+    echo "  git -C modules/common add -A && git -C modules/common commit && git -C modules/common push"
+    echo "  git add modules/common && git commit -m 'chore: bump common'"
+fi
+
+if [ -n "$FAILED" ]; then
+    print_error "Failed steps:$FAILED"
+    exit 1
+fi
+
+print_success "Backup completed"
+exit 0

@@ -4,6 +4,13 @@
 # Main dotfiles application script with dependency management
 # ====================
 
+# Ensure script runs with Bash (not sh/dash)
+# This handles cases where the script is invoked with 'sh apply.sh'
+if [ -z "$BASH_VERSION" ]; then
+    # Not running in Bash, re-execute with bash
+    exec bash "$0" "$@"
+fi
+
 # Directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
@@ -48,6 +55,9 @@ MODULES_DIR="$SCRIPT_DIR/modules"
 # Enumerate subdirectories in modules directory
 for dir in "$MODULES_DIR"/*; do
     [ -d "$dir" ] || continue
+    # Only directories that can actually be applied. Without this the
+    # `common` git submodule shows up in the menu and reports "missing".
+    [ -f "$dir/apply.sh" ] || continue
     module_name="$(basename "$dir")"
     MODULES+=("$module_name")
 done
@@ -193,7 +203,7 @@ for module in $RESOLVED_MODULES; do
     # Check if module init script exists
     if is_module_executable "$module" "$MODULES_DIR"; then
         # Execute module init script
-        if sh "$MODULES_DIR/$module/apply.sh"; then
+        if bash "$MODULES_DIR/$module/apply.sh"; then
             print_success "$module setup completed"
             MODULE_STATUS="$MODULE_STATUS $module:success"
         else

@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Ensure script runs with Bash (not sh/dash)
+# This handles cases where the script is invoked with 'sh backup.sh'
+if [ -z "$BASH_VERSION" ]; then
+    exec bash "$0" "$@"
+fi
+
 # Load utils
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/lib/utils.sh" ]; then
